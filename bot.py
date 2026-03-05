@@ -3,138 +3,135 @@ import logging
 from flask import Flask, request
 import telebot
 
-# Настройка логирования для диагностики
+# Настроим логирование для диагностики
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("telegram_bot")
 
-# === Загрузка переменных окружения ===
+# === Параметры окружения ===
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))  # Админ ID, по умолчанию 0 для проверки
+ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))  # Установить значение по умолчанию 0 (если переменной нет)
 CHANNEL_ID = os.environ.get('CHANNEL_ID')
 
 # Проверяем обязательные параметры
-if not BOT_TOKEN or not ADMIN_ID or not CHANNEL_ID:
-    logger.error("❌ Не заданы переменные окружения BOT_TOKEN, ADMIN_ID или CHANNEL_ID!")
-    raise ValueError("Обязательные параметры окружения отсутствуют!")
+if not BOT_TOKEN or not CHANNEL_ID or ADMIN_ID == 0:
+    logger.error("❌ Обязательные параметры окружения не установлены: BOT_TOKEN, ADMIN_ID или CHANNEL_ID.")
+    raise ValueError("Один из параметров окружения отсутствует!")
 
-# Инициализация Telegram API и Flask
-bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True)  # Пропускаем старые обновления
+# === Инициализация бота и Flask ===
+bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True)
 app = Flask(__name__)
 
-# Глобальная переменная для подсчета отправленных сообщений
+# === Глобальная переменная ===
 message_count = 0
 
-# === Маршруты для Flask ===
+# === Flask маршруты ===
 
 @app.route("/", methods=["GET"])
 def index():
-    """Диагностический маршрут."""
-    logger.info("Запрос проверки состояния сервера.")
-    return "Сервер работает!", 200
+    """Эндпоинт для проверки работы сервера."""
+    logger.info("Проверка состояния сервера: всё в норме.")
+    return "Сервер работает корректно!", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Обработка обновлений от Telegram."""
+    """Эндпоинт для обработки Webhook."""
     try:
-        # Читаем JSON из запроса Telegram.
         json_str = request.get_data().decode('utf-8')
-        logger.info(f"Получено обновление: {json_str}")
+        logger.info(f"Получено обновление от Telegram: {json_str}")
         update = telebot.types.Update.de_json(json_str)
-        bot.process_new_updates([update])  # Передаем обновления в библиотеку Telebot
+        bot.process_new_updates([update])
         return "ok", 200
     except Exception as e:
-        logger.error(f"Ошибка в обработке Webhook: {e}")
+        logger.error(f"Ошибка обработки Webhook: {e}")
         return "error", 500
 
-# === Обработчики команд ===
+# === Хэндлеры команд бота ===
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    """Приветственная команда."""
+    """Обработчик команды /start."""
     global message_count
-    user_id = message.from_user.id
-    logger.info(f"Запрос команды /start от {user_id}")
+    logger.info(f"/start вызван пользователем {message.from_user.id}")
     bot.reply_to(
         message,
-        f"👋 Привет, {message.from_user.first_name or 'друг'}!\n\n"
-        f"📊 Всего отправлено сообщений: {message_count}.\n\n"
-        f"Используй команды:\n"
-        f"  ➡️ Добавить сообщения: +число\n"
-        f"  ➡️ Статистика: /stats"
+        f"🤖 Привет, {message.from_user.first_name}!\n\n"
+        "Вот что я умею:\n"
+        "1. Команда +число отправляет сообщения в канал.\n"
+        "2. /stats — покажет статистику отправки сообщений.\n\n"
+        f"📊 На данный момент отправлено сообщений: {message_count}"
     )
 
 @bot.message_handler(commands=['stats'])
 def send_stats(message):
-    """Команда для отображения статистики."""
-    logger.info(f"Запрос команды /stats от {message.from_user.id}")
+    """Обработчик команды /stats."""
+    global message_count
+    logger.info(f"/stats вызван пользователем {message.from_user.id}")
     bot.reply_to(
         message,
-        f"📊 Всего отправлено сообщений: {message_count}.\n"
-        f"🔗 Канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
+        f"📊 Статистика:\n"
+        f"- Сообщений отправлено в канал: {message_count}\n"
+        f"- Ссылка на канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
     )
 
-@bot.message_handler(func=lambda message: message.text and message.text.startswith('+'))
+@bot.message_handler(func=lambda message: message.text.startswith('+'))
 def handle_plus_command(message):
-    """Обработка команды +число для отправки сообщений в канал."""
+    """Обработчик команды +число."""
     global message_count
     user_id = message.from_user.id
-    logger.info(f"Запрос команды {message.text} от {user_id}")
+    command = message.text
+
+    logger.info(f"Команда {command} вызвана пользователем {user_id}")
+
+    if user_id != ADMIN_ID:
+        bot.reply_to(message, f"❌ У вас нет прав для выполнения этой команды!")
+        logger.warning(f"Пользователь {user_id} попытался вызвать {command}, но не является админом.")
+        return
 
     try:
-        if user_id != ADMIN_ID:
-            logger.warning(f"Доступ запрещен для пользователя {user_id} (команда {message.text})")
-            bot.reply_to(
-                message,
-                f"❌ Вы не админ!\n\n"
-                f"📊 Всего отправлено сообщений: {message_count}.\n"
-                f"🔗 Тут наш канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
-            )
-            return
-
-        # Парсим количество сообщений из команды
-        count = int(message.text[1:])
+        count = int(command[1:])  # Берём число после знака '+'
+        
         if count <= 0:
             bot.reply_to(message, "⚠️ Число должно быть больше 0!")
             return
         if count > 10000:
-            bot.reply_to(message, "⚠️ Максимальное количество сообщений за раз: 10000!")
+            bot.reply_to(message, "⚠️ Максимум 10000 сообщений за раз!")
             return
 
-        bot.reply_to(message, f"⏳ Отправляю {count} сообщений в канал...")
+        bot.reply_to(message, f"⏳ Начинаю отправку {count} сообщений в канал...")
+
         for i in range(1, count + 1):
             try:
-                bot.send_message(CHANNEL_ID, f"Сообщение {i} из {count}.")
+                bot.send_message(CHANNEL_ID, f"Сообщение {i} из {count}")
                 message_count += 1
             except Exception as e:
-                logger.error(f"Ошибка отправки сообщения #{i}: {e}")
-                bot.send_message(message.chat.id, f"❌ Ошибка при отправке сообщения #{i}: {e}")
+                logger.error(f"Ошибка при отправке сообщения #{i}: {e}")
+                bot.send_message(message.chat.id, f"❌ Ошибка при отправке сообщения номер {i}: {e}")
                 break
 
         bot.reply_to(
             message,
-            f"✅ Успешно отправлено {count} сообщений!\n"
-            f"📊 Всего отправлено: {message_count}."
+            f"✅ Отправлено {count} сообщений в канал успешно!\n"
+            f"📊 Всего сообщений: {message_count}"
         )
     except ValueError:
-        logger.error(f"Неверный формат команды: {message.text}")
-        bot.reply_to(message, "❌ Неверный формат команды! Используйте команду в формате: +число")
+        bot.reply_to(message, "❌ Неверный формат команды! Используйте +число.")
     except Exception as e:
-        logger.error(f"Ошибка в обработке команды {message.text}: {e}")
-        bot.reply_to(message, "❌ Произошла ошибка. Попробуйте позже.")
+        logger.error(f"Неожиданное исключение в обработке команды {command}: {e}")
+        bot.reply_to(message, "❌ Что-то пошло не так... Попробуйте позже!")
 
 @bot.message_handler(func=lambda message: True)
 def handle_unknown(message):
-    """Обработчик неизвестных сообщений."""
-    logger.info(f"Неизвестная команда от {message.from_user.id}: {message.text}")
+    """Обработчик неизвестных команд."""
+    logger.info(f"Неизвестное сообщение: {message.text} от {message.from_user.id}")
     bot.reply_to(
         message,
-        "❌ Я понял только команды:\n"
-        "/start — информация о боте\n"
-        "/stats — статистика\n"
-        "+число — отправить сообщения в канал"
+        "❌ Я не понимаю эту команду. Попробуйте:\n"
+        "/start — для информации\n"
+        "/stats — для статистики\n"
+        "+число — для отправки сообщений в канал"
     )
 
 # === Запуск приложения ===
 if __name__ == "__main__":
-    logger.info("🤖 Бот запущен!")
+    logger.info("🤖 Бот запущен и готов к работе!")
     app.run(host="0.0.0.0", port=5000)
