@@ -131,7 +131,7 @@ def webhook():
         except Exception as e:
             logger.error("Webhook: ошибка при process_new_updates: %s", e)
             logger.debug(traceback.format_exc())
-            # Возвращаем 200, чтобы Telegram не отрубил webhook; можно изменить стратегию
+            # Возвращаем 200, чтобы Telegram не блокировал (можно менять стратегию)
             return "ok", 200
 
         return "ok", 200
@@ -206,26 +206,44 @@ def handle_stats(message):
 
 @bot.message_handler(func=lambda m: m.text and m.text.strip().startswith("+"))
 def handle_plus(m):
+    """
+    Новый порядок:
+    1) Сначала принимаем и парсим команду, подтверждаем получение.
+    2) Затем проверяем, является ли пользователь админом — если да, выполняем отправку.
+       Если нет — сообщаем, что команда принята, но выполнение запрещено.
+    Это гарантирует, что бот всегда реагирует на входящее обновление, даже если пользователь не админ.
+    """
     global message_count
     try:
         user_id = m.from_user.id
         text = m.text.strip()
-        logger.info("+ command from %s: %s", user_id, text)
-        if user_id != ADMIN_ID:
-            bot.reply_to(m, "У вас нет прав для этой команды.")
-            return
+        logger.info("Получена команда + от %s: %s", user_id, text)
+
+        # Сначала парсим число и подтверждаем получение
         try:
             cnt = int(text[1:])
-        except ValueError:
-            bot.reply_to(m, "Неверный формат. Используйте +число")
+        except Exception:
+            bot.reply_to(m, "❌ Неверный формат. Используйте +число, например +5.")
             return
+
         if cnt <= 0:
-            bot.reply_to(m, "Число должно быть > 0")
+            bot.reply_to(m, "⚠️ Число должно быть больше 0.")
             return
         if cnt > 10000:
-            bot.reply_to(m, "Максимум 10000")
+            bot.reply_to(m, "⚠️ Слишком много. Максимум 10000.")
             return
-        bot.reply_to(m, f"Отправляю {cnt} сообщений...")
+
+        # Подтверждаем получение команды (до проверки прав)
+        bot.reply_to(m, f"✅ Команда принята: отправка {cnt} сообщений. Проверяю права...")
+
+        # Теперь проверяем, является ли пользователь админом
+        if user_id != ADMIN_ID:
+            logger.warning("Пользователь %s не админ, выполнение команды запрещено", user_id)
+            bot.send_message(m.chat.id, "❌ У вас нет прав на выполнение отправки. Запрос зафиксирован, но не выполнен.")
+            return
+
+        # Пользователь — админ: выполняем отправку
+        bot.send_message(m.chat.id, f"⏳ Начинаю отправку {cnt} сообщений в канал...")
         sent = 0
         for i in range(1, cnt + 1):
             try:
@@ -235,14 +253,16 @@ def handle_plus(m):
             except Exception as e:
                 logger.error("send_message error #%d: %s", i, e)
                 try:
-                    bot.send_message(m.chat.id, f"Ошибка отправки #{i}: {e}")
+                    bot.send_message(m.chat.id, f"❌ Ошибка при отправке сообщения #{i}: {e}")
                 except Exception:
-                    logger.error("Не удалось отправить сообщение об ошибке пользователю")
+                    logger.error("Не удалось уведомить админа об ошибке отправки")
                 break
+
         try:
-            bot.send_message(m.chat.id, f"Отправлено {sent} из {cnt}. Всего: {message_count}")
+            bot.send_message(m.chat.id, f"✅ Отправлено {sent} из {cnt}. Всего за процесс: {message_count}")
         except Exception:
             logger.error("Не удалось отправить итоговое сообщение администратору")
+
     except Exception as e:
         logger.error("handle_plus unexpected: %s", e)
         logger.debug(traceback.format_exc())
@@ -253,7 +273,7 @@ def handle_unknown(m):
         uid = getattr(m.from_user, "id", None)
         text = getattr(m, "text", "<no-text>")
         logger.info("unknown message from %s: %s", uid, text)
-        bot.reply_to(m, "Я понимаю /start, /stats и команды вида +число (только админ).")
+        bot.reply_to(m, "�� понимаю /start, /stats и команды вида +число (только админ).")
     except Exception as e:
         logger.error("handle_unknown error: %s", e)
         logger.debug(traceback.format_exc())
