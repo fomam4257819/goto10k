@@ -1,4 +1,6 @@
 import os
+import json
+import threading
 from flask import Flask, request
 import telebot
 from dotenv import load_dotenv
@@ -8,18 +10,34 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
-CHANNEL_ID = os.getenv('CHANNEL_ID')  # например: -100123456789
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN not set in environment")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(name)
+app = Flask(__name__)  # ✅ Исправлено
 
 # Счетчик отправленных сообщений
 message_count = 0
+message_lock = threading.Lock()
+
+def load_count():
+    try:
+        with open('message_count.json', 'r') as f:
+            return json.load(f)['count']
+    except:
+        return 0
+
+def save_count(count):
+    with open('message_count.json', 'w') as f:
+        json.dump({'count': count}, f)
+
+message_count = load_count()
 
 # === Webhook ===
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    global message_count
     json_str = request.get_data().decode('utf-8')
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
@@ -57,10 +75,11 @@ def handle_plus_command(message):
 
         bot.reply_to(message, f"⏳ Начинаю отправку {count} смс в канал...")
 
-        for i in range(1, count+1):
+        for i in range(1, count + 1):
             try:
                 bot.send_message(CHANNEL_ID, f"+1 ({i}/{count})")
-                message_count += 1
+                with message_lock:
+                    message_count += 1
             except Exception as e:
                 bot.send_message(
                     message.chat.id,
@@ -68,6 +87,7 @@ def handle_plus_command(message):
                 )
                 break
 
+        save_count(message_count)
         bot.send_message(
             message.chat.id,
             f"✅ Успешно отправлено {count} смс в канал!\n"
@@ -94,6 +114,6 @@ def handle_other_messages(message):
     )
 
 # === Главный запуск для локального теста ===
-if name == "main":
+if __name__ == "__main__":  # ✅ Исправлено
     print("🤖 Бот Flask запущен...")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
