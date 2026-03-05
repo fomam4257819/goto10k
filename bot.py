@@ -1,32 +1,54 @@
 import os
 import logging
-from flask import Flask, request
-import telebot
 import traceback
+from flask import Flask, request, jsonify
+import telebot
+from typing import Optional
 
-# === Логирование для диагностики ===
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# ==========================
+# Настройка логирования
+# ==========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
 logger = logging.getLogger("telegram_bot")
 
-# === Загрузка переменных окружения ===
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))  # Обязательно укажите в Render
-CHANNEL_ID = os.environ.get('CHANNEL_ID')      # Например: -1001234567890
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL')    # Необязательно: https://your-domain/webhook
+# ==========================
+# Переменные окружения
+# ==========================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+try:
+    ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+except Exception:
+    ADMIN_ID = 0
+CHANNEL_ID = os.environ.get("CHANNEL_ID")            # пример: -1001234567890
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")          # опционально: https://your-domain/webhook
+LOG_PATH = os.environ.get("WEBHOOK_LOG_PATH", "/tmp/webhook_incoming.log")
+PORT = int(os.environ.get("PORT", 5000))
 
-# Проверяем п��ременные окружения
-if not BOT_TOKEN or not CHANNEL_ID or ADMIN_ID == 0:
-    logger.error("❌ Ошибка: BOT_TOKEN, ADMIN_ID или CHANNEL_ID не заданы корректно!")
-    raise ValueError("Не заданы обязательные переменные окружения: BOT_TOKEN, ADMIN_ID, CHANNEL_ID")
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN не задан!")
+    raise ValueError("BOT_TOKEN required")
+if not CHANNEL_ID:
+    logger.error("CHANNEL_ID не задан!")
+    raise ValueError("CHANNEL_ID required")
+if ADMIN_ID == 0:
+    logger.error("ADMIN_ID не задан или равен 0!")
+    raise ValueError("ADMIN_ID required and must be non-zero")
 
-# === Инициализация TeleBot и Flask ===
-bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True)
+# ==========================
+# Инициализация TeleBot и Flask
+# ==========================
+bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True, threaded=True)
 app = Flask(__name__)
 
-# === Глобальная статистика ===
+# Счётчик отправленных сообщений (память процесса)
 message_count = 0
 
-# === Вспомогательные функции ===
+# ==========================
+# Утилиты
+# ==========================
 def safe_write_log(path: str, text: str) -> None:
     try:
         with open(path, "a", encoding="utf-8") as f:
@@ -34,155 +56,208 @@ def safe_write_log(path: str, text: str) -> None:
     except Exception as e:
         logger.error(f"Не удалось записать в {path}: {e}")
 
-# === Flask маршруты ===
+def tail(path: str, n: int = 200) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        return "".join(lines[-n:])
+    except FileNotFoundError:
+        return ""
+    except Exception as e:
+        logger.error(f"tail error: {e}")
+        return ""
 
+# ==========================
+# Flask маршруты
+# ==========================
 @app.route("/", methods=["GET"])
 def index():
-    """Маршрут для проверки работоспособности сервера."""
-    logger.info("Проверка состояния сервера: GET /")
-    return "Сервер работает корректно!", 200
+    logger.info("GET / - проверка состояния")
+    return "OK", 200
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Маршрут для обработки Webhook от Telegram."""
+    """
+    Основной endpoint для Telegram Webhook.
+    Логируем всё входящее, сохраняем в файл и передаём в telebot.
+    """
     try:
+        remote = request.remote_addr
+        headers = dict(request.headers)
         raw = request.get_data()
         if not raw:
             logger.warning("Webhook: пустое тело запроса")
-            # Чтобы Telegram не перестал слать вебхуки — возвращаем 200
             return "ok", 200
 
         try:
-            json_str = raw.decode('utf-8')
+            text = raw.decode("utf-8")
         except Exception:
-            json_str = str(raw)
-        logger.info(f"Webhook: получено обновление: {json_str}")
+            text = str(raw)
 
-        # Сохраняем входящее обновление в файл для отладки
-        safe_write_log("/tmp/webhook_incoming.log", json_str)
+        logger.info(f"Webhook: received from {remote} headers={headers.get('User-Agent','')} len={len(raw)}")
+        logger.info(f"Webhook: payload: {text}")
 
+        # Сохранение для дебага
+        safe_write_log(LOG_PATH, text)
+
+        # Попытка распарсить Update
         try:
-            update = telebot.types.Update.de_json(json_str)
+            update = telebot.types.Update.de_json(text)
         except Exception as e:
-            logger.error(f"Webhook: не удалось распарсить JSON в Update: {e}")
+            logger.error(f"Webhook: не удалось расп��рсить JSON -> Update: {e}")
             logger.debug(traceback.format_exc())
-            return "ok", 200  # не хотим, чтобы Telegram повторял бесконечно при некорректном теле
+            # Возвращаем 200, чтобы Telegram не держал в очереди бесконечно
+            return "ok", 200
 
-        # Передаём обновление в TeleBot
+        # Передача обновления в telebot
         try:
             bot.process_new_updates([update])
-            logger.info("Webhook: обновление передано TeleBot для обработки")
+            logger.info("Webhook: update передано telebot для обработки")
         except Exception as e:
-            logger.error(f"Webhook: TeleBot.process_new_updates выбросил исключение: {e}")
+            logger.error(f"Webhook: ошибка при process_new_updates: {e}")
             logger.debug(traceback.format_exc())
-            # Возвращаем 200, чтобы Telegram не отрезал вебхук; можно вернуть 500 для повторной отправки
+            # Возвращаем 200, чтобы Telegram не блокировал (можно менять стратегию)
             return "ok", 200
 
         return "ok", 200
 
     except Exception as e:
-        logger.error(f"Webhook: неожиданная ошибка: {e}")
+        logger.error(f"Webhook: непредвиденная ошибка: {e}")
         logger.debug(traceback.format_exc())
         return "error", 500
 
-# === Хэндлеры команд ===
+@app.route("/debug/logs", methods=["GET"])
+def debug_logs():
+    """
+    Возвращает последние строки файла с входящими webhook'ами и краткую информацию.
+    Не публикуйте этот endpoint публично в продакшне без защиты.
+    """
+    content = tail(LOG_PATH, 500)
+    return (
+        jsonify({
+            "webhook_url": WEBHOOK_URL or "not-set",
+            "log_preview": content,
+        }),
+        200,
+    )
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    """Ответ на команду /start."""
-    global message_count
+@app.route("/admin/send_test", methods=["POST"])
+def admin_send_test():
+    """
+    Отправляет тестовое сообщение администратору, чтобы проверить исходящие сообщения.
+    Запрос без авторизации — удобно для дебага, но в продакшне защитите этот endpoint.
+    """
+    try:
+        bot.send_message(ADMIN_ID, "Тестовое сообщение от бота (check outgoing)")
+        return "sent", 200
+    except Exception as e:
+        logger.error(f"admin_send_test error: {e}")
+        logger.debug(traceback.format_exc())
+        return f"error: {e}", 500
+
+@app.route("/admin/set_webhook", methods=["POST"])
+def admin_set_webhook():
+    """
+    Устанавливает webhook в Telegram по WEBHOOK_URL (если задан).
+    В Render этот endpoint полезен, если вам нужно вызвать установку вручную.
+    """
+    if not WEBHOOK_URL:
+        return "WEBHOOK_URL not set", 400
+    try:
+        bot.remove_webhook()
+        ok = bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"set_webhook -> {WEBHOOK_URL} : {ok}")
+        return jsonify({"result": ok}), 200
+    except Exception as e:
+        logger.error(f"set_webhook error: {e}")
+        logger.debug(traceback.format_exc())
+        return f"error: {e}", 500
+
+# ==========================
+# Handlers (telebot)
+# ==========================
+@bot.message_handler(commands=["start"])
+def handle_start(message):
     try:
         user_id = message.from_user.id
-        logger.info(f"Команда /start от {user_id}")
-        bot.reply_to(message, "Привет! Я твой бот. Попробуй /stats или +число (только админ).")
+        logger.info(f"/start from {user_id}")
+        bot.reply_to(message, f"Привет, {message.from_user.first_name or ''}! Ваш id: {user_id}")
     except Exception as e:
-        logger.error(f"Ошибка в обработчике /start: {e}")
+        logger.error(f"handle_start error: {e}")
         logger.debug(traceback.format_exc())
 
-@bot.message_handler(commands=['stats'])
-def send_stats(message):
-    """Ответ на команду /stats."""
+@bot.message_handler(commands=["stats"])
+def handle_stats(message):
     try:
-        logger.info(f"Команда /stats от {message.from_user.id}")
-        bot.reply_to(
-            message,
-            f"📊 Всего отправлено сообщений: {message_count}\n"
-            f"🔗 Канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
-        )
+        bot.reply_to(message, f"Всего отправлено сообщений (за время работы процесса): {message_count}")
     except Exception as e:
-        logger.error(f"Ошибка в обработчике /stats: {e}")
+        logger.error(f"handle_stats error: {e}")
         logger.debug(traceback.format_exc())
 
-@bot.message_handler(func=lambda message: message.text and message.text.strip().startswith('+'))
-def handle_plus_command(message):
-    """Обработка команды +число для отправки сообщений в канал (только админ)."""
+@bot.message_handler(func=lambda m: m.text and m.text.strip().startswith("+"))
+def handle_plus(m):
     global message_count
     try:
-        user_id = message.from_user.id
-        text = message.text.strip()
-        logger.info(f"Команда {text} от {user_id}")
-
+        user_id = m.from_user.id
+        text = m.text.strip()
+        logger.info(f"+ command from {user_id}: {text}")
         if user_id != ADMIN_ID:
-            logger.warning(f"Пользователь {user_id} не админ, попытка выполнить {text}")
-            bot.reply_to(message, "❌ У вас нет прав для выполнения этой команды.")
+            bot.reply_to(m, "У вас нет прав для этой команды.")
             return
-
         try:
-            count = int(text[1:])
+            cnt = int(text[1:])
         except ValueError:
-            bot.reply_to(message, "❌ Неверный формат. Используйте +число, например +5.")
+            bot.reply_to(m, "Неверный формат. Используйте +число")
             return
-
-        if count <= 0:
-            bot.reply_to(message, "⚠️ Число должно быть больше 0.")
+        if cnt <= 0:
+            bot.reply_to(m, "Число должно быть > 0")
             return
-        if count > 10000:
-            bot.reply_to(message, "⚠️ Слишком много. Максимум 10000.")
+        if cnt > 10000:
+            bot.reply_to(m, "Максимум 10000")
             return
-
-        bot.reply_to(message, f"⏳ Начинаю отправку {count} сообщений в канал...")
+        bot.reply_to(m, f"Отправляю {cnt} сообщений...")
         sent = 0
-        for i in range(1, count + 1):
+        for i in range(1, cnt + 1):
             try:
-                bot.send_message(CHANNEL_ID, f"Сообщение {i} из {count}")
+                bot.send_message(CHANNEL_ID, f"Сообщение {i} из {cnt}")
                 sent += 1
                 message_count += 1
             except Exception as e:
-                logger.error(f"Ошибка отправки сообщения #{i}: {e}")
-                bot.send_message(message.chat.id, f"❌ Ошибка при отправке сообщения #{i}: {e}")
+                logger.error(f"send_message error #{i}: {e}")
+                bot.send_message(m.chat.id, f"Ошибка отправки #{i}: {e}")
                 break
-
-        bot.reply_to(message, f"✅ Отправлено {sent} из {count} сообщений. Всего: {message_count}")
+        bot.send_message(m.chat.id, f"Отправлено {sent} из {cnt}. Всего: {message_count}")
     except Exception as e:
-        logger.error(f"Ошибка в обработчике +число: {e}")
+        logger.error(f"handle_plus unexpected: {e}")
         logger.debug(traceback.format_exc())
-        try:
-            bot.reply_to(message, "❌ Внутренняя ошибка обработчика. Смотрите логи.")
-        except Exception:
-            pass
 
-@bot.message_handler(func=lambda message: True)
-def handle_unknown(message):
-    """Обработчик всех прочих сообщений."""
+@bot.message_handler(func=lambda m: True)
+def handle_unknown(m):
     try:
-        logger.info(f"Неизвестное сообщение от {message.from_user.id}: {getattr(message, 'text', '<no-text>')}")
-        bot.reply_to(message, "Я понимаю /start, /stats и +число (только админ).")
+        uid = getattr(m.from_user, "id", None)
+        text = getattr(m, "text", "<no-text>")
+        logger.info(f"unknown message from {uid}: {text}")
+        bot.reply_to(m, "Я понимаю /start, /stats и команды вида +число (только админ).")
     except Exception as e:
-        logger.error(f"Ошибка в handle_unknown: {e}")
+        logger.error(f"handle_unknown error: {e}")
         logger.debug(traceback.format_exc())
 
-# === (Опционально) Установка webhook из кода, если указан WEBHOOK_URL ===
-if WEBHOOK_URL:
-    try:
-        # Устанавливаем webhook при старте, если задан WEBHOOK_URL
-        bot.remove_webhook()
-        success = bot.set_webhook(url=WEBHOOK_URL)
-        logger.info(f"Попытка установки webhook: {WEBHOOK_URL} -> {success}")
-    except Exception as e:
-        logger.error(f"Не удалось установить webhook автоматически: {e}")
-        logger.debug(traceback.format_exc())
-
-# === Запуск приложения ===
+# ==========================
+# Авто-установка webhook при прямом запуске (локальный запуск)
+# ==========================
 if __name__ == "__main__":
-    logger.info("🤖 Бот запущен (app.run). На проде использйте gunicorn: gunicorn bot:app")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    if WEBHOOK_URL:
+        try:
+            bot.remove_webhook()
+            ok = bot.set_webhook(url=WEBHOOK_URL)
+            logger.info(f"Авто-установка webhook при старте: {WEBHOOK_URL} -> {ok}")
+        except Exception as e:
+            logger.error(f"Ошибка авто-установки webhook: {e}")
+            logger.debug(traceback.format_exc())
+
+    logger.info("Запуск Flask dev server (для продакшена используйте gunicorn): app.run")
+    app.run(host="0.0.0.0", port=PORT)
