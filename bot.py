@@ -32,13 +32,22 @@ WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # например: https://mybot.com
 
 # Инициализация
 bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True)
-app = Flask(__name__)  # ✅ Исправлено
+app = Flask(__name__)
 
 message_count = 0
 
 logger.info("✅ Бот инициализирован успешно")
 
-# === Webhook ===
+# === Регистрация Webhook ===
+if WEBHOOK_URL:
+    try:
+        bot.remove_webhook()
+        bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
+        logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}/{BOT_TOKEN}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при установке webhook: {e}")
+
+# === Webhook endpoint ===
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     global message_count
@@ -51,16 +60,6 @@ def webhook():
         logger.error(f"Webhook error: {e}")
         return "error", 500
 
-@app.before_first_request
-def setup_webhook():
-    if WEBHOOK_URL:
-        try:
-            bot.remove_webhook()
-            bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
-            logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}/{BOT_TOKEN}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка при установке webhook: {e}")
-
 # === Хэндлеры ===
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -68,8 +67,8 @@ def send_welcome(message):
         name = message.from_user.first_name or "пользователь"
         text = f"👋 Привет, {name}!\n\n"
         text += "Напишите команду в формате: +число\n"
-        text += "Например: +20 (отправит 20 смс в канал)\n"
-        text += f"📊 Всего смс отправлено: {message_count}"
+        text += "Например: +20 (отправит 20 сообщений в канал)\n"
+        text += f"📊 Всего отправлено: {message_count}"
         bot.reply_to(message, text)
     except Exception as e:
         logger.error(f"Error in send_welcome: {e}")
@@ -82,7 +81,7 @@ def handle_plus_command(message):
         bot.reply_to(
             message,
             f"❌ Вы не админ!\n\n"
-            f"📊 Всего отправлено: {message_count} смс\n"
+            f"📊 Всего отправлено: {message_count}\n"
             f"🔗 Канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
         )
         return
@@ -120,8 +119,9 @@ def send_stats(message):
     try:
         bot.reply_to(
             message,
-            f"📊 Статистика:\n"
-            f"Всего отправлено: {message_count} смс"
+            f"📊 Статистика:\n\n"
+            f"Всего отправлено: {message_count}\n"
+            f"🔗 Канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
         )
     except Exception as e:
         logger.error(f"Error in stats: {e}")
@@ -129,11 +129,11 @@ def send_stats(message):
 @bot.message_handler(func=lambda message: True)
 def handle_other(message):
     try:
-        bot.reply_to(message, "Используйте: +число")
+        bot.reply_to(message, "Я понимаю только команды вида +число\nНапример: +20")
     except Exception as e:
         logger.error(f"Error handling message: {e}")
 
-# === Запуск ===
-if __name__ == "__main__":  # ✅ Исправлено
+# === Главный запуск ===
+if __name__ == "__main__":
     logger.info("🤖 Бот запущен на 0.0.0.0:5000")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
