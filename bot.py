@@ -1,66 +1,89 @@
 import os
-import json
-import threading
+import logging
 from flask import Flask, request
 import telebot
 from dotenv import load_dotenv
 
+# Логирование
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Загружаем переменные окружения
 load_dotenv()
 
+# Проверяем все переменные
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID'))
-CHANNEL_ID = os.getenv('CHANNEL_ID')
-
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN not set in environment")
+    logger.error("❌ BOT_TOKEN не установлен!")
+    raise ValueError("BOT_TOKEN required")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+try:
+    ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
+except ValueError:
+    logger.error("❌ ADMIN_ID должен быть числом!")
+    raise
+
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+if not CHANNEL_ID:
+    logger.error("❌ CHANNEL_ID не установлен!")
+    raise ValueError("CHANNEL_ID required")
+
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # например: https://mybot.com
+
+# Инициализация
+bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True)
 app = Flask(__name__)  # ✅ Исправлено
 
-# Счетчик отправленных сообщений
 message_count = 0
-message_lock = threading.Lock()
 
-def load_count():
-    try:
-        with open('message_count.json', 'r') as f:
-            return json.load(f)['count']
-    except:
-        return 0
-
-def save_count(count):
-    with open('message_count.json', 'w') as f:
-        json.dump({'count': count}, f)
-
-message_count = load_count()
+logger.info("✅ Бот инициализирован успешно")
 
 # === Webhook ===
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    json_str = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "!", 200
+    global message_count
+    try:
+        json_str = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "error", 500
+
+@app.before_first_request
+def setup_webhook():
+    if WEBHOOK_URL:
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
+            logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}/{BOT_TOKEN}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при установке webhook: {e}")
 
 # === Хэндлеры ===
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    text = f"👋 Привет, {message.from_user.first_name}!\n\n"
-    text += "Напишите команду в формате: +число\n"
-    text += "Например: +20 (отправит 20 смс в канал)\n"
-    text += f"📊 Всего смс отправлено: {message_count}"
-    bot.reply_to(message, text)
+    try:
+        name = message.from_user.first_name or "пользователь"
+        text = f"👋 Привет, {name}!\n\n"
+        text += "Напишите команду в формате: +число\n"
+        text += "Например: +20 (отправит 20 смс в канал)\n"
+        text += f"📊 Всего смс отправлено: {message_count}"
+        bot.reply_to(message, text)
+    except Exception as e:
+        logger.error(f"Error in send_welcome: {e}")
+        bot.reply_to(message, "❌ Ошибка при обработке команды")
 
-@bot.message_handler(func=lambda message: message.text.startswith('+'))
+@bot.message_handler(func=lambda message: message.text and message.text.startswith('+'))
 def handle_plus_command(message):
     global message_count
     if message.from_user.id != ADMIN_ID:
         bot.reply_to(
             message,
             f"❌ Вы не админ!\n\n"
-            f"📊 В нашем канале уже отправлено: {message_count} смс\n"
-            f"🔗 Ссылка на канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
+            f"📊 Всего отправлено: {message_count} смс\n"
+            f"🔗 Канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
         )
         return
 
@@ -70,50 +93,47 @@ def handle_plus_command(message):
             bot.reply_to(message, "⚠️ Число должно быть положительным!")
             return
         if count > 10000:
-            bot.reply_to(message, "⚠️ Максимум 10000 смс за раз!")
+            bot.reply_to(message, "⚠️ Максимум 10000!")
             return
 
-        bot.reply_to(message, f"⏳ Начинаю отправку {count} смс в канал...")
+        bot.reply_to(message, f"⏳ Отправляю {count} сообщений...")
 
         for i in range(1, count + 1):
             try:
                 bot.send_message(CHANNEL_ID, f"+1 ({i}/{count})")
-                with message_lock:
-                    message_count += 1
+                message_count += 1
             except Exception as e:
-                bot.send_message(
-                    message.chat.id,
-                    f"❌ Ошибка при отправке смс #{i}: {str(e)}"
-                )
+                logger.error(f"Error sending message #{i}: {e}")
+                bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
                 break
 
-        save_count(message_count)
         bot.send_message(
             message.chat.id,
-            f"✅ Успешно отправлено {count} смс в канал!\n"
-            f"📊 Всего отправлено: {message_count}"
+            f"✅ Отправлено {count}!\n📊 Всего: {message_count}"
         )
 
     except ValueError:
-        bot.reply_to(message, "❌ Неверный формат! Используйте: +число\nНапример: +20")
+        bot.reply_to(message, "❌ Неверный формат! Используйте: +20")
 
 @bot.message_handler(commands=['stats'])
 def send_stats(message):
-    bot.reply_to(
-        message,
-        f"📊 Статистика:\n\n"
-        f"Всего смс отправлено: {message_count}\n"
-        f"🔗 Канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
-    )
+    try:
+        bot.reply_to(
+            message,
+            f"📊 Статистика:\n"
+            f"Всего отправлено: {message_count} смс"
+        )
+    except Exception as e:
+        logger.error(f"Error in stats: {e}")
 
 @bot.message_handler(func=lambda message: True)
-def handle_other_messages(message):
-    bot.reply_to(
-        message,
-        "Я понимаю только команды вида +число\nНапример: +20"
-    )
+def handle_other(message):
+    try:
+        bot.reply_to(message, "Используйте: +число")
+    except Exception as e:
+        logger.error(f"Error handling message: {e}")
 
-# === Главный запуск для локального теста ===
+# === Запуск ===
 if __name__ == "__main__":  # ✅ Исправлено
-    print("🤖 Бот Flask запущен...")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    logger.info("🤖 Бот запущен на 0.0.0.0:5000")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
