@@ -27,14 +27,124 @@ message_count = 0
 # === Webhook настройка ===
 try:
     bot.remove_webhook()
-    logger.info("✅ Webhook успешно удалён.")
+    bot.set_webhook(url="https://<ВАШ-ДОМЕН>/webhook")  # Замените на ваш публичный адрес
+    logger.info("✅ Webhook успешно установлен.")
 except Exception as e:
-    logger.error(f"❌ Ошибка при удалении старого Webhook: {e}")
+    logger.error(f"❌ Ошибка при установке Webhook: {e}")
     raise e
 
-# === Маршруты Flask ===
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+# === Маршру�� для проверки сервера ===
+@app.route("/", methods=["GET"])
+def index():
+    return "Сервер запущен и работает!", 200
+
+# === Маршрут для обработки Webhook от Telegram ===
+@app.route("/webhook", methods=["POST"])  # Фиксируем путь /webhook
 def webhook():
+    try:
+        json_str = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])  # Передаём обновление боту для обработки
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"Ошибка обработки Webhook: {e}")
+        return "error", 500
+
+# === Хэндлеры бота ===
+
+# Команда /start
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    global message_count
+    try:
+        name = message.from_user.first_name or "пользователь"
+        text = (
+            f"👋 Привет, {name}!\n\n"
+            "Напишите команду в формате: +число\n"
+            "Например: +20 (отправит 20 сообщений в канал).\n\n"
+            f"📊 Всего отправлено сообщений: {message_count}"
+        )
+        bot.reply_to(message, text)
+    except Exception as e:
+        logger.error(f"Ошибка в обработке команды /start: {e}")
+        bot.reply_to(message, "❌ Произошла ошибка. Повторите попытку позже.")
+
+# Команда для отправки сообщений (формат +число)
+@bot.message_handler(func=lambda message: message.text and message.text.startswith('+'))
+def handle_plus_command(message):
+    global message_count
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(
+            message,
+            f"❌ Вы не админ!\n\n"
+            f"📊 На данный момент отправлено: {message_count} сообщений.\n"
+            f"🔗 Канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
+        )
+        return
+
+    try:
+        count = int(message.text[1:])
+        if count <= 0:
+            bot.reply_to(message, "⚠️ Число должно быть больше 0!")
+            return
+        if count > 10000:
+            bot.reply_to(message, "⚠️ Максимальное количество сообщений за раз: 10000.")
+            return
+
+        bot.reply_to(message, f"⏳ Начинаю отправку {count} сообщений в канал...")
+
+        for i in range(1, count + 1):
+            try:
+                bot.send_message(CHANNEL_ID, f"Сообщение {i} из {count}.")
+                message_count += 1
+            except Exception as e:
+                bot.send_message(
+                    message.chat.id,
+                    f"❌ Ошибка при отправке сообщения #{i}: {e}"
+                )
+                break
+
+        bot.send_message(
+            message.chat.id,
+            f"✅ Успешная отправка {count} сообщений!\n"
+            f"📊 Всего отправлено: {message_count}."
+        )
+
+    except ValueError:
+        bot.reply_to(message, "❌ Неверный формат команды! Используйте: +число.")
+    except Exception as e:
+        logger.error(f"Ошибка в обработке команды +число: {e}")
+        bot.reply_to(message, "❌ Произошла ошибка. Повторите попытку позже.")
+
+# Команда /stats
+@bot.message_handler(commands=['stats'])
+def send_stats(message):
+    try:
+        bot.reply_to(
+            message,
+            f"📊 Статистика:\n\n"
+            f"Всего сообщений отправлено: {message_count}\n"
+            f"🔗 Канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в обработке команды /stats: {e}")
+        bot.reply_to(message, "❌ Произошла ошибка. Повторите попытку позже.")
+
+# Обработка остальных сообщений
+@bot.message_handler(func=lambda message: True)
+def handle_unknown(message):
+    bot.reply_to(
+        message,
+        "Неизвестная команда. Используйте:\n"
+        "/start — увидеть приветствие.\n"
+        "/stats — узнать статистику.\n"
+        "+число — отправить сообщения в канал."
+    )
+
+# === Запуск бота на Flask ===
+if __name__ == "__main__":
+    logger.info("🤖 Бот запущен!")
+    app.run(host="0.0.0.0", port=5000)def webhook():
     try:
         json_str = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_str)
