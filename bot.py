@@ -1,24 +1,33 @@
 import os
+from flask import Flask, request
 import telebot
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
 load_dotenv()
 
-# Получаем переменные из Render
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
 CHANNEL_ID = os.getenv('CHANNEL_ID')  # например: -100123456789
 
-# Инициализируем бот
 bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(name)
 
-# Счетчик отправленных смс (в реальном приложении лучше использовать БД)
+# Счетчик отправленных сообщений
 message_count = 0
 
+# === Webhook ===
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    global message_count
+    json_str = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "!", 200
+
+# === Хэндлеры ===
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    """Обработчик команды /start"""
     text = f"👋 Привет, {message.from_user.first_name}!\n\n"
     text += "Напишите команду в формате: +число\n"
     text += "Например: +20 (отправит 20 смс в канал)\n"
@@ -27,10 +36,7 @@ def send_welcome(message):
 
 @bot.message_handler(func=lambda message: message.text.startswith('+'))
 def handle_plus_command(message):
-    """Обработчик команд вида +число"""
     global message_count
-    
-    # Проверяем, является ли пользователь админом
     if message.from_user.id != ADMIN_ID:
         bot.reply_to(
             message,
@@ -39,46 +45,40 @@ def handle_plus_command(message):
             f"🔗 Ссылка на канал: https://t.me/{CHANNEL_ID.replace('-100', '')}"
         )
         return
-    
-    # Парсим число из команды
+
     try:
-        count = int(message.text[1:])  # Убираем '+' и преобразуем в число
-        
+        count = int(message.text[1:])
         if count <= 0:
             bot.reply_to(message, "⚠️ Число должно быть положительным!")
             return
-        
         if count > 10000:
             bot.reply_to(message, "⚠️ Максимум 10000 смс за раз!")
             return
-        
-        # Отправляем смс в канал
+
         bot.reply_to(message, f"⏳ Начинаю отправку {count} смс в канал...")
-        
-        for i in range(count):
+
+        for i in range(1, count+1):
             try:
-                bot.send_message(CHANNEL_ID, "+1")
+                bot.send_message(CHANNEL_ID, f"+1 ({i}/{count})")
                 message_count += 1
             except Exception as e:
                 bot.send_message(
                     message.chat.id,
-                    f"❌ Ошибка при отправке смс #{i+1}: {str(e)}"
+                    f"❌ Ошибка при отправке смс #{i}: {str(e)}"
                 )
                 break
-        
-        # Отправляем отчет
+
         bot.send_message(
             message.chat.id,
             f"✅ Успешно отправлено {count} смс в канал!\n"
             f"📊 Всего отправлено: {message_count}"
         )
-        
+
     except ValueError:
         bot.reply_to(message, "❌ Неверный формат! Используйте: +число\nНапример: +20")
 
 @bot.message_handler(commands=['stats'])
 def send_stats(message):
-    """Обработчик команды /stats - показывает статистику"""
     bot.reply_to(
         message,
         f"📊 Статистика:\n\n"
@@ -88,13 +88,12 @@ def send_stats(message):
 
 @bot.message_handler(func=lambda message: True)
 def handle_other_messages(message):
-    """Обработчик остальных сообщений"""
     bot.reply_to(
         message,
-        "Я понимаю только команды вида +число\n"
-        "Например: +20"
+        "Я понимаю только команды вида +число\nНапример: +20"
     )
 
-if __name__ == '__main__':
-    print("🤖 Бот запущен...")
-    bot.infinity_polling()
+# === Главный запуск для локального теста ===
+if name == "main":
+    print("🤖 Бот Flask запущен...")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
