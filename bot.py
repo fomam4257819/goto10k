@@ -1,306 +1,270 @@
-import os
-import sys
-import logging
-import traceback
-from flask import Flask, request, jsonify
 import telebot
+import psycopg2
 
-# ==========================
-# Настройка логирования
-# ==========================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    stream=sys.stdout,
-)
-logger = logging.getLogger("telegram_bot")
+# =========================
+# 🔐 НАСТРОЙКИ
+# =========================
+user_states = {}
+trainer_data = {}
+TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+ADMIN_ID = 123456789  # сюда вставишь свой Telegram ID
 
-# ==========================
-# Переменные окружения
-# ==========================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-try:
-    ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-except Exception:
-    ADMIN_ID = 0
-CHANNEL_ID = os.environ.get("CHANNEL_ID")            # пример: -1001234567890
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")          # опционально: https://your-domain/webhook
-LOG_PATH = os.environ.get("WEBHOOK_LOG_PATH", "/tmp/webhook_incoming.log")
-PORT = int(os.environ.get("PORT", 5000))
-RUN_MODE = os.environ.get("RUN_MODE", "").lower()    # if "polling" -> use polling for debug
+DB_CONFIG = {
+    "dbname": "ТВОЯ_БД",
+    "user": "ТВОЙ_ЮЗЕР",
+    "password": "ТВОЙ_ПАРОЛЬ",
+    "host": "ТВОЙ_ХОСТ",
+    "port": "5432"
+}
 
-# ==========================
-# Проверка обязательных переменных
-# ==========================
-if not BOT_TOKEN:
-    logger.error("BOT_TOKEN не задан! Установите переменную окружения BOT_TOKEN.")
-    raise ValueError("BOT_TOKEN required")
-if not CHANNEL_ID:
-    logger.error("CHANNEL_ID не задан! Установите переменную окружения CHANNEL_ID.")
-    raise ValueError("CHANNEL_ID required")
-if ADMIN_ID == 0:
-    logger.error("ADMIN_ID не задан или равен 0! Установите переменную окружения ADMIN_ID.")
-    raise ValueError("ADMIN_ID required and must be non-zero")
+bot = telebot.TeleBot(TOKEN)
 
-# ==========================
-# Инициализация TeleBot и Flask
-# ==========================
-bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True, threaded=True)
-app = Flask(__name__)
+# =========================
+# 🗄️ ПОДКЛЮЧЕНИЕ К БД
+# =========================
 
-# Счётчик отправленных сообщений (жизнь процесса)
-message_count = 0
+def get_db_connection():
+    return psycopg2.connect(**DB_CONFIG)
 
-# ==========================
-# Утилиты
-# ==========================
-def safe_write_log(path: str, text: str) -> None:
+# =========================
+# 🏁 СТАРТ
+# =========================
+@bot.message_handler(commands=['start'])
+def start(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("Выбрать тренера", "Связаться с администратором")
+
+    bot.send_message(
+        message.chat.id,
+        "Добро пожаловать в шахматную школу ♟️\nВыберите действие:",
+        reply_markup=markup
+    )@bot.message_handler(func=lambda message: message.text == "Выбрать тренера")
+def choose_trainer_start(message):
+    bot.send_message(message.chat.id, "Начинаем заполнение данных (следующий этап)")@bot.message_handler(func=lambda message: message.text == "Связаться с администратором")
+def contact_admin_start(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("Завершить чат")
+
+    bot.send_message(
+        message.chat.id,
+        "Ожидайте ответа администратора...",
+        reply_markup=markup
+    )
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(message.chat.id, "Бот запущен")
+
+# =========================
+# 🚀 ЗАПУСК
+# =========================
+@bot.message_handler(func=lambda message: message.text == "Edit")
+def admin_panel(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.chat.id, "Нет доступа")
+        return
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("Добавить пользователя", "Удалить пользователя")
+
+    bot.send_message(message.chat.id, "Админ-панель:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text == "Добавить пользователя")
+def add_trainer_start(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    user_states[message.chat.id] = "waiting_username"
+    bot.send_message(message.chat.id, "Введи @username тренера:")@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_username")
+def get_username(message):
+    trainer_data[message.chat.id] = {}
+    trainer_data[message.chat.id]["username"] = message.text
+
+    user_states[message.chat.id] = "waiting_name"
+    bot.send_message(message.chat.id, "Введи имя тренера:")@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_name")
+def get_name(message):
+    trainer_data[message.chat.id]["name"] = message.text
+
+    user_states[message.chat.id] = "waiting_description"
+    bot.send_message(message.chat.id, "Введи описание тренера:")@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_description")
+def get_description(message):
+    trainer_data[message.chat.id]["description"] = message.text
+
+    data = trainer_data[message.chat.id]
+
     try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(text + "\n")
-    except Exception as e:
-        logger.error(f"Не удалось записать в {path}: {e}")
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-def tail(path: str, n: int = 200) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        return "".join(lines[-n:])
-    except FileNotFoundError:
-        return ""
-    except Exception as e:
-        logger.error(f"tail error: {e}")
-        return ""
+        cursor.execute(
+            "INSERT INTO trainers (username, name, description) VALUES (%s, %s, %s)",
+            (data["username"], data["name"], data["description"])
+        )
 
-# ==========================
-# Лог стартапа (показывает, что развернули нужный релиз)
-# ==========================
-logger.info("STARTUP: бот загружен. PID=%s WEBHOOK_URL=%s RUN_MODE=%s", os.getpid(), WEBHOOK_URL or "not-set", RUN_MODE)
+        conn.commit()
+        cursor.close()
+        conn.close()
 
-# ==========================
-# Flask маршруты
-# ==========================
-@app.route("/", methods=["GET"])
-def index():
-    logger.info("GET / - проверка состояния")
-    return "OK", 200
-
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"}), 200
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    """
-    Основной endpoint для Telegram Webhook.
-    Логируем входящие, сохраняем в файл и передаём в telebot.
-    """
-    try:
-        remote = request.remote_addr
-        headers = dict(request.headers)
-        raw = request.get_data()
-        if not raw:
-            logger.warning("Webhook: пустое тело запроса")
-            # Возвращаем 200, чтобы Telegram не повторял бесконечно
-            return "ok", 200
-
-        try:
-            text = raw.decode("utf-8")
-        except Exception:
-            text = str(raw)
-
-        logger.info("Webhook: received from %s User-Agent=%s len=%d", remote, headers.get("User-Agent", ""), len(raw))
-        logger.info("Webhook: payload: %s", text)
-
-        # Сохраняем входящие для отладки
-        safe_write_log(LOG_PATH, text)
-
-        # Попытка распарсить Update
-        try:
-            update = telebot.types.Update.de_json(text)
-        except Exception as e:
-            logger.error("Webhook: не удалось распарсить JSON -> Update: %s", e)
-            logger.debug(traceback.format_exc())
-            # Возвращаем 200, чтобы Telegram не зацикливал попытки при некорректном теле
-            return "ok", 200
-
-        # Передаём обновление в TeleBot
-        try:
-            bot.process_new_updates([update])
-            logger.info("Webhook: update передано telebot для обработки")
-        except Exception as e:
-            logger.error("Webhook: ошибка при process_new_updates: %s", e)
-            logger.debug(traceback.format_exc())
-            # Возвращаем 200, чтобы Telegram не блокировал (можно менять стратегию)
-            return "ok", 200
-
-        return "ok", 200
+        bot.send_message(message.chat.id, "Тренер добавлен ✅")
 
     except Exception as e:
-        logger.error("Webhook: непредвиденная ошибка: %s", e)
-        logger.debug(traceback.format_exc())
-        return "error", 500
+        bot.send_message(message.chat.id, f"Ошибка: {e}")
 
-@app.route("/debug/logs", methods=["GET"])
-def debug_logs():
-    """
-    Возвращает preview входящих webhook payload'ов.
-    Не оставляйте публичным без защиты в продакшене.
-    """
-    content = tail(LOG_PATH, 500)
-    return jsonify({
-        "webhook_url": WEBHOOK_URL or "not-set",
-        "log_preview": content,
-    }), 200
+    # очистка состояния
+    user_states.pop(message.chat.id, None)
+    trainer_data.pop(message.chat.id, None)
 
-@app.route("/admin/send_test", methods=["POST"])
-def admin_send_test():
-    """
-    Отправляет тестовое сообщение администратору. Удобно для проверки исходящих сообщений.
-    """
+@bot.callback_query_handler(func=lambda call: call.data.startswith("delete_"))
+def delete_trainer(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    trainer_id = call.data.split("_")[1]
     try:
-        bot.send_message(ADMIN_ID, "Тестовое сообщение от бота (check outgoing)")
-        return "sent", 200
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("DELETE FROM trainers WHERE id = %s", (trainer_id,))
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        bot.answer_callback_query(call.id, "Удалено ✅")
+        bot.edit_message_text(
+            "Тренер удалён",
+            call.message.chat.id,
+            call.message.message_id
+        )
+
     except Exception as e:
-        logger.error("admin_send_test error: %s", e)
-        logger.debug(traceback.format_exc())
-        return f"error: {e}", 500
+        bot.answer_callback_query(call.id, "Ошибка")
+        bot.send_message(call.message.chat.id, f"Ошибка: {e}")@bot.message_handler(func=lambda message: message.text == "Удалить пользователя")
+def delete_trainer_start(message):
+    if message.from_user.id != ADMIN_ID:
+        return
 
-@app.route("/admin/set_webhook", methods=["POST"])
-def admin_set_webhook():
-    """
-    Устанавливает webhook в Telegram по WEBHOOK_URL (если задан).
-    """
-    if not WEBHOOK_URL:
-        return "WEBHOOK_URL not set", 400
     try:
-        bot.remove_webhook()
-        ok = bot.set_webhook(url=WEBHOOK_URL)
-        logger.info("set_webhook -> %s : %s", WEBHOOK_URL, ok)
-        return jsonify({"result": ok}), 200
-    except Exception as e:
-        logger.error("set_webhook error: %s", e)
-        logger.debug(traceback.format_exc())
-        return f"error: {e}", 500
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-# ==========================
-# Handlers (telebot)
-# ==========================
-@bot.message_handler(commands=["start"])
-def handle_start(message):
-    try:
-        user_id = message.from_user.id
-        logger.info("/start from %s", user_id)
-        bot.reply_to(message, f"Привет, {message.from_user.first_name or ''}! Ваш id: {user_id}")
-    except Exception as e:
-        logger.error("handle_start error: %s", e)
-        logger.debug(traceback.format_exc())
+        cursor.execute("SELECT id, name FROM trainers")
+        trainers = cursor.fetchall()
 
-@bot.message_handler(commands=["stats"])
-def handle_stats(message):
-    try:
-        bot.reply_to(message, f"Всего отправлено сообщений (за время работы процесса): {message_count}")
-    except Exception as e:
-        logger.error("handle_stats error: %s", e)
-        logger.debug(traceback.format_exc())
+        cursor.close()
+        conn.close()
 
-@bot.message_handler(func=lambda m: m.text and m.text.strip().startswith("+"))
-def handle_plus(m):
-    """
-    Новый порядок:
-    1) Сначала принимаем и парсим команду, подтверждаем получение.
-    2) Затем проверяем, является ли пользователь админом — если да, выполняем отправку.
-       Если нет — сообщаем, что команда принята, но выполнение запрещено.
-    Это гарантирует, что бот всегда реагирует на входящее обновление, даже если пользователь не админ.
-    """
-    global message_count
-    try:
-        user_id = m.from_user.id
-        text = m.text.strip()
-        logger.info("Получена команда + от %s: %s", user_id, text)
-
-        # Сначала парсим число и подтверждаем получение
-        try:
-            cnt = int(text[1:])
-        except Exception:
-            bot.reply_to(m, "❌ Неверный формат. Используйте +число, например +5.")
+        if not trainers:
+            bot.send_message(message.chat.id, "Список пуст")
             return
 
-        if cnt <= 0:
-            bot.reply_to(m, "⚠️ Число должно быть больше 0.")
-            return
-        if cnt > 10000:
-            bot.reply_to(m, "⚠️ Слишком много. Максимум 10000.")
-            return
+        markup = types.InlineKeyboardMarkup()
 
-        # Подтверждаем получение команды (до проверки прав)
-        bot.reply_to(m, f"✅ Команда принята: отправка {cnt} сообщений. Проверяю права...")
+        for trainer in trainers:
+            trainer_id, name = trainer
+            btn = types.InlineKeyboardButton(
+                text=name,
+                callback_data=f"delete_{trainer_id}"
+            )
+            markup.add(btn)
 
-        # Теперь проверяем, является ли пользователь админом
-        if user_id != ADMIN_ID:
-            logger.warning("Пользователь %s не админ, выполнение команды запрещено", user_id)
-            bot.send_message(m.chat.id, "❌ У вас нет прав на выполнение отправки. Запрос зафиксирован, но не выполнен.")
-            return
-
-        # Пользователь — админ: выполняем отправку
-        bot.send_message(m.chat.id, f"⏳ Начинаю отправку {cnt} сообщений в канал...")
-        sent = 0
-        for i in range(1, cnt + 1):
-            try:
-                bot.send_message(CHANNEL_ID, f"Сообщение {i} из {cnt}")
-                sent += 1
-                message_count += 1
-            except Exception as e:
-                logger.error("send_message error #%d: %s", i, e)
-                try:
-                    bot.send_message(m.chat.id, f"❌ Ошибка при отправке сообщения #{i}: {e}")
-                except Exception:
-                    logger.error("Не удалось уведомить админа об ошибке отправки")
-                break
-
-        try:
-            bot.send_message(m.chat.id, f"✅ Отправлено {sent} из {cnt}. Всего за процесс: {message_count}")
-        except Exception:
-            logger.error("Не удалось отправить итоговое сообщение администратору")
+        bot.send_message(message.chat.id, "Выбери тренера для удаления:", reply_markup=markup)
 
     except Exception as e:
-        logger.error("handle_plus unexpected: %s", e)
-        logger.debug(traceback.format_exc())
+        bot.send_message(message.chat.id, f"Ошибка: {e}")
+@bot.message_handler(func=lambda message: message.text == "Выбрать тренера")
+def choose_trainer_start(message):
+    user_states[message.chat.id] = "waiting_phone"
 
-@bot.message_handler(func=lambda m: True)
-def handle_unknown(m):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    btn = types.KeyboardButton("Отправить номер", request_contact=True)
+    markup.add(btn)
+
+    bot.send_message(message.chat.id, "Отправь номертелефона:", reply_markup=markup)@bot.message_handler(content_types=['contact'])
+def get_phone(message):
+    if user_states.get(message.chat.id) != "waiting_phone":
+        return
+
+    user_form[message.chat.id] = {}
+    user_form[message.chat.id]["phone"] = message.contact.phone_number
+
+    user_states[message.chat.id] = "waiting_user_name"
+    bot.send_message(message.chat.id, "Введи своё имя:")@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_user_name")
+def get_user_name(message):
+    user_form[message.chat.id]["name"] = message.text
+
+    user_states[message.chat.id] = "waiting_level"
+    bot.send_message(message.chat.id, "Опиши уровень игры:")@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_level")
+def get_level(message):
+    user_form[message.chat.id]["level"] = message.text
+
     try:
-        uid = getattr(m.from_user, "id", None)
-        text = getattr(m, "text", "<no-text>")
-        logger.info("unknown message from %s: %s", uid, text)
-        bot.reply_to(m, "�� понимаю /start, /stats и команды вида +число (только админ).")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id, name FROM trainers")
+        trainers = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        if not trainers:
+            bot.send_message(message.chat.id, "Нет доступных тренеров")
+            return
+
+        markup = types.InlineKeyboardMarkup()
+
+        for t in trainers:
+            btn = types.InlineKeyboardButton(
+                text=t[1],
+                callback_data=f"choose_{t[0]}"
+            )
+            markup.add(btn)
+
+        bot.send_message(message.chat.id, "Выбери тренера:", reply_markup=markup)
+
     except Exception as e:
-        logger.error("handle_unknown error: %s", e)
-        logger.debug(traceback.format_exc())
+        bot.send_message(message.chat.id, f"Ошибка: {e}")@bot.callback_query_handler(func=lambda call: call.data.startswith("choose_"))
+def send_request_to_trainer(call):
+    trainer_id = call.data.split("_")[1]
 
-# ==========================
-# Точка запуска — polling (debug) или webhook (prod)
-# ==========================
-if __name__ == "__main__":
-    # Если задан режим polling — используем его для теста (переменная RUN_MODE=polling)
-    if RUN_MODE == "polling":
-        logger.info("Запуск в polling-режиме для теста. Убедитесь, что WEBHOOK_URL не установлен или webhook удалён.")
-        try:
-            bot.remove_webhook()
-        except Exception:
-            pass
-        # infinity_polling блокирует поток и запускает обработчики напрямую
-        bot.infinity_polling(timeout=10, long_polling_timeout=5)
-    else:
-        # Попытка автоматической установки webhook при старте (если задан WEBHOOK_URL)
-        if WEBHOOK_URL:
-            try:
-                bot.remove_webhook()
-                ok = bot.set_webhook(url=WEBHOOK_URL)
-                logger.info("Авто-установка webhook при старте: %s -> %s", WEBHOOK_URL, ok)
-            except Exception as e:
-                logger.error("Ошибка авто-установки webhook: %s", e)
-                logger.debug(traceback.format_exc())
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        logger.info("Запуск Flask dev server (для продакшена используйте gunicorn): app.run on %s", PORT)
-        app.run(host="0.0.0.0", port=PORT)
+        cursor.execute("SELECT username, name FROM trainers WHERE id = %s", (trainer_id,))
+        trainer = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        if not trainer:
+            bot.answer_callback_query(call.id, "Ошибка")
+            return
+
+        username, trainer_name = trainer
+        data = user_form.get(call.message.chat.id)
+
+        if not data:
+            bot.answer_callback_query(call.id, "Ошибка данных")
+            return
+
+        text = f"""
+Вас выбрали как тренера!
+
+Имя: {data['name']}
+Телефон: {data['phone']}
+Уровень: {data['level']}
+        """
+
+        bot.send_message(username, text)
+        bot.answer_callback_query(call.id, "Заявка отправлена ✅")
+
+        # очистка данных
+        user_states.pop(call.message.chat.id, None)
+        user_form.pop(call.message.chat.id, None)
+
+    except Exception as e:
+        bot.answer_callback_query(call.id, "Ошибка")
+        bot.send_message(call.message.chat.id, f"Ошибка: {e}")
+print("Бот запущен...")
+bot.infinity_polling()
