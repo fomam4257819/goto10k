@@ -1,67 +1,61 @@
 import telebot
 from telebot import types
-import psycopg2
+import libsql_client
 import os
-from datetime import datetime
 
 # =========================
 # 🔐 НАСТРОЙКИ
 # =========================
+user_states = {}
+trainer_data = {}
+user_form = {}
+admin_chats = {}
+
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TOKEN_HERE")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
 
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME", "chess_school"),
-    "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", "password"),
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": os.getenv("DB_PORT", "5432")
-}
+# Turso Database Configuration
+TURSO_URL = "libsql://yhbvgt65-yhbvgt65.aws-ap-northeast-1.turso.io"
+TURSO_TOKEN = os.getenv("TURSO_TOKEN", "YOUR_TOKEN_HERE")
 
 bot = telebot.TeleBot(TOKEN)
 
 # =========================
-# 📊 СОСТОЯНИЯ ПОЛЬЗОВАТЕЛЕЙ
-# =========================
-user_states = {}  # Отслеживание статуса пользователя
-user_form = {}    # Форма данных пользователя
-trainer_data = {} # Данные тренера при добавлении
-admin_chats = {}  # {user_id: admin_id} - активные чаты с админом
-
-# =========================
-# 🗄️ ПОДКЛЮЧЕНИЕ К БД
+# 🗄️ ПОДКЛЮЧЕНИЕ К БД (TURSO)
 # =========================
 
 def get_db_connection():
-    """Подключение к БД"""
+    """Подключение к Turso"""
     try:
-        return psycopg2.connect(**DB_CONFIG)
+        client = libsql_client.create_client(
+            url=TURSO_URL,
+            auth_token=TURSO_TOKEN
+        )
+        return client
     except Exception as e:
         print(f"Ошибка подключения к БД: {e}")
         return None
 
 def init_db():
     """Инициализация таблиц БД"""
-    conn = get_db_connection()
-    if not conn:
-        return
-    
-    cursor = conn.cursor()
-    
-    # Таблица тренеров
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trainers (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(255) UNIQUE NOT NULL,
-            name VARCHAR(255) NOT NULL,
-            description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        client = get_db_connection()
+        
+        # Таблица тренеров
+        client.execute("""
+            CREATE TABLE IF NOT EXISTS trainers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        print("✅ База данных инициализирована")
+        
+    except Exception as e:
+        print(f"❌ Ошибка инициализации БД: {e}")
 
 # =========================
 # 🏁 СТАРТ БОТА
@@ -121,7 +115,6 @@ def get_trainer_username(message):
     """Получение username тренера"""
     username = message.text.strip()
     
-    # Проверка формата @username
     if not username.startswith("@"):
         bot.send_message(message.chat.id, "❌ Username должен начинаться с @\nПопробуй снова:")
         return
@@ -144,30 +137,26 @@ def get_trainer_description(message):
     data = trainer_data[message.chat.id]
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        client = get_db_connection()
         
-        cursor.execute(
-            "INSERT INTO trainers (username, name, description) VALUES (%s, %s, %s)",
-            (data["username"], data["name"], data["description"])
+        client.execute(
+            "INSERT INTO trainers (username, name, description) VALUES (?, ?, ?)",
+            [data["username"], data["name"], data["description"]]
         )
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
         
         bot.send_message(
             message.chat.id,
             f"✅ Тренер {data['name']} успешно добавлен!"
         )
         
-    except psycopg2.IntegrityError:
-        bot.send_message(
-            message.chat.id,
-            f"❌ Тренер с username {data['username']} уже существует"
-        )
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
+        if "UNIQUE constraint failed" in str(e):
+            bot.send_message(
+                message.chat.id,
+                f"❌ Тренер с username {data['username']} уже существует"
+            )
+        else:
+            bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
     
     user_states.pop(message.chat.id, None)
     trainer_data.pop(message.chat.id, None)
@@ -181,14 +170,10 @@ def delete_trainer_start(message):
         return
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        client = get_db_connection()
         
-        cursor.execute("SELECT id, name FROM trainers ORDER BY name")
-        trainers = cursor.fetchall()
-        
-        cursor.close()
-        conn.close()
+        result = client.execute("SELECT id, name FROM trainers ORDER BY name")
+        trainers = result.rows if hasattr(result, 'rows') else []
         
         if not trainers:
             bot.send_message(message.chat.id, "📭 Список тренеров пуст")
@@ -196,7 +181,9 @@ def delete_trainer_start(message):
         
         markup = types.InlineKeyboardMarkup()
         
-        for trainer_id, name in trainers:
+        for trainer in trainers:
+            trainer_id = trainer[0]
+            name = trainer[1]
             btn = types.InlineKeyboardButton(
                 text=f"❌ {name}",
                 callback_data=f"delete_trainer_{trainer_id}"
@@ -218,20 +205,16 @@ def delete_trainer_confirm(call):
     trainer_id = call.data.split("_")[2]
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        client = get_db_connection()
         
-        cursor.execute("SELECT name FROM trainers WHERE id = %s", (trainer_id,))
-        trainer = cursor.fetchone()
+        result = client.execute("SELECT name FROM trainers WHERE id = ?", [trainer_id])
+        trainer = result.rows[0] if result.rows else None
         
         if not trainer:
             bot.answer_callback_query(call.id, "❌ Тренер не найден", show_alert=True)
             return
         
-        cursor.execute("DELETE FROM trainers WHERE id = %s", (trainer_id,))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        client.execute("DELETE FROM trainers WHERE id = ?", [trainer_id])
         
         bot.answer_callback_query(call.id, "✅ Удалено!", show_alert=False)
         bot.edit_message_text(
@@ -252,21 +235,20 @@ def list_trainers(message):
         return
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        client = get_db_connection()
         
-        cursor.execute("SELECT id, name, username, description FROM trainers ORDER BY name")
-        trainers = cursor.fetchall()
-        
-        cursor.close()
-        conn.close()
+        result = client.execute("SELECT id, name, username, description FROM trainers ORDER BY name")
+        trainers = result.rows if hasattr(result, 'rows') else []
         
         if not trainers:
             bot.send_message(message.chat.id, "📭 Список тренеров пуст")
             return
         
         text = "📋 **Список тренеров:**\n\n"
-        for idx, (tid, name, username, desc) in enumerate(trainers, 1):
+        for idx, trainer in enumerate(trainers, 1):
+            name = trainer[1]
+            username = trainer[2]
+            desc = trainer[3] or "Нет описания"
             text += f"{idx}. **{name}** ({username})\n"
             text += f"   _{desc}_\n\n"
         
@@ -339,14 +321,10 @@ def get_level(message):
     user_form[message.chat.id]["level"] = message.text
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        client = get_db_connection()
         
-        cursor.execute("SELECT id, name, description FROM trainers ORDER BY name")
-        trainers = cursor.fetchall()
-        
-        cursor.close()
-        conn.close()
+        result = client.execute("SELECT id, name, description FROM trainers ORDER BY name")
+        trainers = result.rows if hasattr(result, 'rows') else []
         
         if not trainers:
             bot.send_message(
@@ -358,7 +336,9 @@ def get_level(message):
         
         markup = types.InlineKeyboardMarkup()
         
-        for trainer_id, name, desc in trainers:
+        for trainer in trainers:
+            trainer_id = trainer[0]
+            name = trainer[1]
             btn = types.InlineKeyboardButton(
                 text=f"👨‍🏫 {name}",
                 callback_data=f"choose_trainer_{trainer_id}"
@@ -382,17 +362,13 @@ def send_request_to_trainer(call):
     trainer_id = call.data.split("_")[2]
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        client = get_db_connection()
         
-        cursor.execute(
-            "SELECT username, name FROM trainers WHERE id = %s",
-            (trainer_id,)
+        result = client.execute(
+            "SELECT username, name FROM trainers WHERE id = ?",
+            [trainer_id]
         )
-        trainer = cursor.fetchone()
-        
-        cursor.close()
-        conn.close()
+        trainer = result.rows[0] if result.rows else None
         
         if not trainer:
             bot.answer_callback_query(call.id, "❌ Тренер не найден", show_alert=True)
@@ -459,7 +435,7 @@ def cancel_selection(message):
     bot.send_message(message.chat.id, "Отменено. Главное меню:", reply_markup=markup)
 
 # =========================
-# 💬 ЧАТС АДМИНИСТРАТОРОМ
+# 💬 ЧАТ С АДМИНИСТРАТОРОМ
 # =========================
 
 @bot.message_handler(func=lambda message: message.text == "Связаться с администратором")
@@ -505,7 +481,6 @@ def accept_chat(call):
     """Администратор принимает чат"""
     user_id = int(call.data.split("_")[2])
     
-    # Проверка, не активен ли чат
     if user_id in admin_chats:
         bot.answer_callback_query(call.id, "⚠️ Чат уже активен с другим админом", show_alert=True)
         return
@@ -513,7 +488,6 @@ def accept_chat(call):
     admin_chats[user_id] = call.from_user.id
     user_states[user_id] = "in_admin_chat"
     
-    # Уведомления
     bot.edit_message_text(
         "✅ Чат принят! Начинаем общение.",
         call.message.chat.id,
@@ -547,7 +521,7 @@ def reject_chat(call):
         
         bot.send_message(
             user_id,
-            "❌ Администратор отклонил вашу заявку. Попробуйте позже.",
+            "�� Администратор отклонил вашу заявку. Попробуйте позже.",
             reply_markup=markup
         )
     except:
@@ -561,7 +535,6 @@ def end_chat(message):
     
     admin_id = admin_chats[message.chat.id]
     
-    # Уведомления
     bot.send_message(
         message.chat.id,
         "👋 Чат завершён. Спасибо за обращение!"
@@ -575,11 +548,9 @@ def end_chat(message):
     except:
         pass
     
-    # Очистка
     admin_chats.pop(message.chat.id, None)
     user_states[message.chat.id] = "main_menu"
     
-    # Возврат в главное меню
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("Выбрать тренера", "Связаться с администратором")
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=markup)
@@ -604,7 +575,6 @@ def relay_user_message(message):
 @bot.message_handler(func=lambda message: message.from_user.id == ADMIN_ID)
 def relay_admin_message(message):
     """Пересылка сообщения от админа к пользователю"""
-    # Проверка, активен ли чат
     user_id = None
     for uid, aid in admin_chats.items():
         if aid == message.from_user.id:
